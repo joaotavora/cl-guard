@@ -5,79 +5,104 @@
 ;;;
 (defparameter *catch-errors* t)
 
-(defvar *polls*)
-(defvar *thingpoller-queue*)
+(defclass poller ()
+  ((polls :initarg :polls :initform nil :accessor polls)
+   (runningp :initform nil :accessor runningp)
+   (stop-flag :initform nil :accessor stop-flag)
+   (lock :initform (bt:make-lock) :reader lock)))
 
-(defun poller-loop (polls &optional queue)
-  (let ((*thingpoller-queue* queue)
-        (*polls* polls))
-    (labels ((poll-thing (thing fn &key (insistent t))
-               (push (make-poller thing fn :insistent insistent) *polls*))
-             (unpoll-thing (thing)
-               (setq *polls* (delete thing *polls* :key #'car))))
-      (catch 'stop
-        (loop 
-          ;; read mail
-          (log:debug "Reading mail")
-          (loop for (command . args) = (and queue
-                                            (queue:dequeue *thingpoller-queue* :wait nil))
-                while command
-                do (cond ((eq command :stop)
-                          (throw 'stop nil))
-                         ((eq command :poll-thing)
-                          (log:debug "A request to poll something!")
-                          (apply #'poll-thing args))
-                         ((eq command :unpoll-thing)
-                          (apply #'unpoll-thing args))))
-          ;; loop over polls
-          (log:debug "Looping over ~a polls" (length polls))
-          (loop for (thing . fn) in *polls*
-                do (restart-case
-                       (funcall fn)
-                     (remove-poll ()
-                       :report (lambda (stream)
-                                 (format stream "Stop polling ~a" thing))
-                       (unpoll-thing thing))
-                     (leave-poll ()
-                       :report (lambda (stream)
-                                 (format stream "Keep polling ~a" thing)))))
-          (log:debug "Sleeping a bit!")
-          (sleep 3))))))
+(defclass poll ()
+  ((thing :initarg :thing :initform (error "Need a thing!") :reader thing)
+   (fn :initarg :fn :initform (error "Need a function!"))
+   (wrapper)))
 
+(defmethod print-object ((p poll) stream)
+  (print-unreadable-object (p stream :type t)
+    (format stream "polling ~a" (thing p))))
 
-(defun make-poller (thing fn &key (insistent t))
-  (let ((current-state 'unbound)
-        (current-value 'unbound))
-    (cons
-     thing
-     (lambda ()
-       (handler-bind
-           ((error
-              #'(lambda (c)
-                  (log:warn "Poller for ~a errored with ~a" thing c)
-                  (let ((restart (if insistent
-                                     'leave-poll
-                                     'remove-poll)))
-                    (when (and *catch-errors* (find-restart restart))
-                      (invoke-restart restart))))))
-         (cond ((exists-p thing)
-                (let ((new-state (current-state thing))
-                      (new-value))
-                  (cond ((or (eq 'unbound current-state)
-                             (not (funcall (test thing) current-state new-state)))
-                         (log:debug "Thing ~a changed from state ~a to ~a"
-                                    thing current-state new-state)
-                         (setq new-value (current-value thing))
-                         (funcall fn
-                                  (if (eq 'unbound new-value) current-state current-value)
-                                  (if (eq 'unbound new-value) new-state new-value))
-                         (setq current-state new-state
-                               current-value new-value))
-                        (t
-                         (log:debug "Thing ~a unchanged in state ~a"
-                                    thing current-state)))))
-               (t
-                (thingpoller-error 'thing-removed-error "~a has been removed" thing))))))))
+(defmethod initialize-instance :after ((poll poll) &key thing fn)
+  (setf (slot-value poll 'wrapper)
+        (make-poll-function thing fn)))
+
+(defmethod (setf polls) :around (new-value (p poller))
+  (declare (ignore new-value))
+  (bt:with-lock-held ((slot-value p 'lock))
+    (call-next-method)))
+
+(defun start-polling (poller)
+  (when (runningp poller)
+    (error "Poller ~a already started!" poller))
+  (setf (runningp poller) t
+        (stop-flag poller) nil)
+  (unwind-protect
+       (loop until (stop-flag poller)
+             do
+                ;; loop over polls
+                (log:debug "Looping over ~a polls" (length (polls poller)))
+                (loop for poll in (polls poller)
+                      for thing = (thing poll)
+                      for wrapper = (slot-value poll 'wrapper)
+                      do (restart-case
+                             (funcall wrapper)
+                           (remove-poll ()
+                             :report (lambda (stream)
+                                       (format stream "Stop polling ~a" thing))
+                             (setf (polls poller) (delete thing (polls poller)
+                                                          :key #'thing)))
+                           (leave-poll ()
+                             :report (lambda (stream)
+                                       (format stream "Keep polling ~a" thing)))))
+                (log:debug "Sleeping a bit!")
+                (sleep 3))
+    (setf (runningp poller) nil
+          (stop-flag poller) nil)))
+
+(defun stop-polling (poller)
+  (setf (stop-flag poller) t)
+  (loop while (runningp poller)
+        for i from 10 downto 0
+        when (zerop i)
+          do (log:warn "Can't stop poller ~a" poller)
+             (return)
+        do (log:info "Waiting ~a seconds for ~a poller to stop..." i poller)
+           (sleep 1)))
+
+(defun make-poll-function (thing fn)
+  (let ((current-state (if (exists-p thing)
+                           (current-state thing)
+                           'inexistent))
+        (current-value (if (exists-p thing)
+                           (current-value thing)
+                           'unbound)))
+    (lambda ()
+      (handler-bind
+          ((error
+             #'(lambda (c)
+                 (let ((restart 'remove-poll))
+                   (when (and *catch-errors* (find-restart restart))
+                     (log:warn "Poller for ~a errored with ~a. Removing." thing c)
+                     (invoke-restart restart))))))
+        (cond ((exists-p thing)
+               (let ((new-state (current-state thing))
+                     (new-value))
+                 (cond ((or (eq 'inexistent current-state)
+                            (not (funcall (test thing) current-state new-state)))
+                        (log:debug "Thing ~a changed from state ~a to ~a"
+                                   thing current-state new-state)
+                        (setq new-value (current-value thing))
+                        (funcall fn
+                                 (if (eq 'unbound new-value) current-state current-value)
+                                 (if (eq 'unbound new-value) new-state new-value))
+                        (setq current-state new-state
+                              current-value new-value))
+                       (t
+                        (log:debug "Thing ~a unchanged in state ~a"
+                                   thing current-state)))))
+              ((not (eq current-state 'inexistent))
+               (funcall fn
+                        (if (eq 'unbound current-value) current-state current-value)
+                        'inexistent)
+               (thingpoller-error 'thing-removed-error "~a has been removed" thing)))))))
 
 (define-condition thingpoller-error (simple-error)
   ())
@@ -97,17 +122,8 @@
   (:method (thing) 'unbound))
 (defgeneric test (thing)
   (:method (thing) #'eql))
-
-
-;;; Poller control
-;;;
-(defun poll (polls)
-  (let* ((queue (queue:make-queue)))
-    (bt:make-thread
-     #'(lambda () (poller-loop polls queue))
-     :name "Thingpoller thread")
-    queue))
-
+(defun make-poller (&rest polls)
+  (make-instance 'poller :polls polls))
 
 
 ;;; Polling files and directories
@@ -142,19 +158,19 @@
 (progn
   (defvar *test-lambda*)
   (setq *test-lambda*
-        (make-poller (probe-file #p"./thingpoller.lisp")
+        (make-poll (probe-file #p"./thingpoller.lisp")
                      #'(lambda (old new)
                          (log:info "my file has changed from ~a to ~a" old new))
                      nil))
 
   (setq *test-lambda*
-        (make-poller (probe-file #p"/tmp")
+        (make-poll (probe-file #p"/tmp")
                      #'(lambda (old new)
                          (log:info "tmp-file has changed from ~a to ~a" old new))
                      nil))
 
   (setq *test-lambda*
-        (make-poller (probe-file #p"/tmp/shit")
+        (make-poll (probe-file #p"/tmp/shit")
                      #'(lambda (old new)
                          (log:info "shit has changed from ~a to ~a" old new))
                      nil))
@@ -163,7 +179,7 @@
   (defun foo () 'bar)
 
   (setq *test-lambda*
-        (make-poller (make-instance 'symbol-fdefinition :symbol 'foo)
+        (make-poll (make-instance 'symbol-fdefinition :symbol 'foo)
                      #'(lambda (old new)
                          (log:info "foo has changed from ~a to ~a" old new))
                      nil))
