@@ -5,6 +5,7 @@
 (defgeneric remove-watch (pathname guard))
 (defgeneric read-events (guard &key timeout))
 
+(defgeneric event-file (event))
 (defgeneric file-created-p (event))
 (defgeneric file-deleted-p (event))
 (defgeneric file-changed-p (event))

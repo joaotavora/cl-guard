@@ -21,7 +21,8 @@
                (:module "windows"
                 :serial t
                 :components ((:file "package")
-                             (cffi-grovel:grovel-file "grovel-windows")
+                             ;; grovelling not really needed for
+                             ;; windows, according to luismbo.
                              (:file "guard-windows")))
                #+(or bsd freebsd mach-o)
                (:module "kqueue"
