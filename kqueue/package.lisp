@@ -1,2 +1,2 @@
-(defpackage #:cl-guard-bsd
+(defpackage #:cl-guard-kqueue
   (:use #:cl))

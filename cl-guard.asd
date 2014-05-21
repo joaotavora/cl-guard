@@ -8,7 +8,7 @@
   :name "cl-guard"
   :version "0.1.0"
   :description "File system notifications"
-  :author "Jo„o T·vora <joaotavora@gmail.com>"
+  :author "Jo√£o T√°vora <joaotavora@gmail.com>"
   :license "MIT"
   :serial t
   :depends-on (#:cffi
@@ -34,3 +34,7 @@
                 :serial t
                 :components ((:file "package")
                              (:file "guard-inotify")))))
+
+;; Local Variables:
+;; coding: utf-8
+;; End:
