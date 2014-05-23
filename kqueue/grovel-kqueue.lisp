@@ -1,4 +1,5 @@
-;;;; grovel.lisp
+;; Copyright (c) 2012 Chris Howey 
+;; Copyright (c) 2014 João Távora
 
 (in-package #:cl-guard-kqueue)
 
