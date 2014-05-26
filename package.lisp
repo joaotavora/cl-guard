@@ -8,7 +8,9 @@
    #:file-created-p
    #:file-deleted-p
    #:file-changed-p
-   #:file-attributes-changed-p))
+   #:file-attributes-changed-p
+   #:destroy-guard
+   #:event-file))
 
 (defpackage #:cl-guard
   (:use #:cl)
