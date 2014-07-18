@@ -64,54 +64,81 @@
 ;; for why I chose this simplified approach
 
 (defclass windows-guard ()
-  ((watches)))
+  ((watches :initform (make-hash-table) :accessor guard-watches)))
 
-(defclass directory-watch ()
-  ((handle :initarg :handle :reader watch-handle)
-   (pathname :initarg :pathname)))
+(defclass file-watch ()
+  ((target :initarg :target :reader watch-target)
+   (guard :initarg :guard)
+   (handle :initarg :handle :reader watch-handle)))
 
-(defmethod cl-guard-backend:add-watch (pathname (guard windows-guard))
-  (let ((handle (find-first-change-notification (namestring pathname)
+(defclass directory-watch (file-watch)
+  ((scan :reader watch-scan)))
+
+(defun scan (dir)
+  (loop for file in (fad:list-directory dir)
+        unless (fad:directory-pathname-p file)
+          collect (list file
+                        (file-write-date file))))
+
+(defmethod initialize-instance :after ((watch file-watch) &key target guard)
+  (assert (and target (probe-file target)))
+  (let ((handle (find-first-change-notification (namestring target)
                                                 +false+ ;; don't watch subtrees
                                                 (logior +file-notify-change-file-name+
                                                         +file-notify-change-dir-name+
                                                         +file-notify-change-attributes+
                                                         +file-notify-change-last-write+))))
-    (with-slots (watches) guard
-      (if (and handle
-               (not (= handle +invalid-handle-value+)))
-          (push (make-instance 'directory-watch
-                               :handle handle
-                               :pathname pathname)
-                watches)
-          (error "cannot watch ~a, handle ~a returned invalid " pathname handle)))))
+    (if (and handle
+             (not (= handle +invalid-handle-value+)))
+        (setf (slot-value watch 'handle) handle)
+        (error "cannot watch ~a, handle ~a returned invalid " target handle))))
+
+(defmethod initialize-instance :after ((watch directory-watch) &key target)
+  (assert (fad:directory-pathname-p target))
+  (let ((file-tuples (scan target)))
+    (setf (slot-value watch 'scan) file-tuples)))
+
+(defmethod cl-guard-backend:add-watch (pathname (guard windows-guard))
+  (unless (gethash pathname (watches guard))
+    (setf (gethash pathname (watches guard))
+          (make-instance 'directory-watch :target pathname :guard guard))))
 
 (defmethod cl-guard-backend:make-guard () (make-instance 'windows-guard))
 
 (defmethod cl-guard-backend:read-events ((guard windows-guard) &key timeout)
-  (with-slots (watches) guard
-    (let* ((handle-vector (coerce
-                           (loop for watch in watches
-                                 collect (watch-handle watch))
-                           'vector))
-           (retval (wait-for-multiple-objects (length handle-vector)
-                                              handle-vector
-                                              +false+ ;; any change will do
-                                              (or timeout
-                                                  +infinite+))))
-      (case retval
-        (+wait-failed+
-         (error "waiting for events on ~a failed with ~a" guard retval))
-        (+wait-timeout+
-         nil)
-        (otherwise
-         (let* ((idx (- retval
-                        +wait-object-0+))
-                (handle (aref handle-vector idx))
-                (watch (find handle watches :key #'watch-handle)))
-           (assert watch)
-           ;; re-arm the watch
-           (find-next-change-notification handle)))))))
+  (let* ((handle-vector (coerce
+                         (loop for watch being the hash-values in (guard-watches guard)
+                               collect (watch-handle watch))
+                         'vector))
+         (retval (wait-for-multiple-objects (length handle-vector)
+                                            handle-vector
+                                            +false+ ;; any change will do
+                                            (or timeout
+                                                +infinite+))))
+    (case retval
+      (+wait-failed+
+       (error "waiting for events on ~a failed with ~a" guard retval))
+      (+wait-timeout+
+       nil)
+      (otherwise
+       (let* ((idx (- retval
+                      +wait-object-0+))
+              (handle (aref handle-vector idx))
+              (watch (find handle (alexandria:hash-table-values (guard-watches guard))
+                           :key #'watch-handle)))
+         (assert watch nil "Handle ~a doesn't have an associated watch" handle)
+         (let ((old-scan (watch-scan watch))
+               (new-scan (scan (watch-target watch)))
+               (new-tuples  (set-difference ))
+
+               )
+
+           )
+         
+         
+         
+         ;; re-arm the watch
+         (find-next-change-notification handle))))))
 
 
 

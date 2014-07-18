@@ -2,7 +2,6 @@
 ;; Copyright (c) 2014 João Távora
 
 (in-package #:cl-guard-kqueue)
-
 (defclass kqueue-tracker ()
  ((fd :accessor kqueue-fd
    :initarg :fd
